@@ -7,7 +7,7 @@
 use asterctl::cfg::{MonitorConfig, Panel, load_custom_panel};
 use asterctl::render::PanelRenderer;
 use asterctl::sensors::{read_filter_file, read_key_value_file, start_file_slurper};
-use asterctl::{cfg, img};
+use asterctl::{cfg, img, web};
 use asterctl_lcd::{AooScreen, AooScreenBuilder, DISPLAY_SIZE};
 
 use anyhow::anyhow;
@@ -19,7 +19,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -282,6 +283,25 @@ fn run_sensor_panel<B: Into<PathBuf>>(
         cfg.active_panels = settings.general.active_panels.clone();
     }
 
+    let latest_frame: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+    let active_panel_name = Arc::new(Mutex::new(String::new()));
+    let switch_panel_signal = Arc::new(AtomicBool::new(false));
+
+    let web_port = if let Ok(p) = std::env::var("WEB_PORT") {
+        p.parse::<u16>().unwrap_or(settings.general.web_port)
+    } else {
+        settings.general.web_port
+    };
+
+    web::start_web_server(web::WebServerConfig {
+        port: web_port,
+        settings_path: settings_path.clone(),
+        latest_frame: latest_frame.clone(),
+        active_panel_name: active_panel_name.clone(),
+        switch_panel_signal: switch_panel_signal.clone(),
+        sensor_values: sensor_values.clone(),
+    });
+
     let mut is_sleeping = false;
     let mut all_standby_start: Option<Instant> = None;
 
@@ -324,6 +344,9 @@ fn run_sensor_panel<B: Into<PathBuf>>(
             .ok_or(anyhow!("No active panel"))?;
 
         info!("Switching panel: {}", panel.friendly_name());
+        if let Ok(mut name_lock) = active_panel_name.lock() {
+            *name_lock = panel.friendly_name().to_string();
+        }
         let panel_switch_time = Instant::now();
 
         // active panel refresh loop
@@ -426,7 +449,7 @@ fn run_sensor_panel<B: Into<PathBuf>>(
                 is_sleeping = false;
             }
 
-            update_panel(screen, &mut renderer, panel, &values)?;
+            update_panel(screen, &mut renderer, panel, &values, &latest_frame)?;
             drop(values);
 
             let elapsed = upd_start_time.elapsed();
@@ -434,7 +457,7 @@ fn run_sensor_panel<B: Into<PathBuf>>(
                 sleep(refresh - elapsed);
             }
 
-            if panel_switch_time.elapsed() >= switch_time {
+            if panel_switch_time.elapsed() >= switch_time || switch_panel_signal.swap(false, Ordering::Relaxed) {
                 break;
             }
 
@@ -448,11 +471,20 @@ fn update_panel(
     renderer: &mut PanelRenderer,
     panel: &Panel,
     values: &HashMap<String, String>,
+    latest_frame: &Arc<Mutex<Option<Vec<u8>>>>,
 ) -> anyhow::Result<()> {
     debug!("Displaying panel '{}'...", panel.friendly_name());
 
     match renderer.render(panel, values) {
-        Ok(image) => screen.send_image(&image)?,
+        Ok(image) => {
+            let mut jpeg_buf = std::io::Cursor::new(Vec::new());
+            if image.write_to(&mut jpeg_buf, image::ImageFormat::Jpeg).is_ok() {
+                if let Ok(mut frame_lock) = latest_frame.lock() {
+                    *frame_lock = Some(jpeg_buf.into_inner());
+                }
+            }
+            screen.send_image(&image)?;
+        }
         Err(e) => error!("Error rendering panel '{}': {e:?}", panel.friendly_name()),
     }
 
