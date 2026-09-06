@@ -83,6 +83,10 @@ elif grep -q "CPU温度" /config/monitor.json 2>/dev/null || grep -q "RAM Temper
     cp /app/default-cfg/monitor.json /config/monitor.json
 fi
 
+# Ensure latest background images and graphics are copied to /config
+cp /app/default-cfg/*.jpg /config/ 2>/dev/null || true
+cp /app/default-cfg/*.png /config/ 2>/dev/null || true
+
 # Ensure sensor mappings exist in /config and update if legacy hardcoded mapping found
 if [ ! -d /config/sensor-mapping ]; then
     mkdir -p /config/sensor-mapping
