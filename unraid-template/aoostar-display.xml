@@ -1,0 +1,162 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>aoostar-display</Name>
+  <Repository>aoostar-display:latest</Repository>
+  <Registry></Registry>
+  <Network>bridge</Network>
+  <MyIP></MyIP>
+  <Shell>bash</Shell>
+  <Privileged>true</Privileged>
+  <Support>https://github.com/zehnm/aoostar-rs</Support>
+  <Project>https://github.com/zehnm/aoostar-rs</Project>
+  <Overview>
+    High-performance, lightweight Rust daemon for driving the front LCD panel (960x376) on the AOOSTAR WTR Max NAS and GEM12+ PRO.
+    
+    Features:
+    - Replaces heavy Python-based software with a fast, safe, and minimal Alpine Linux Rust container
+    - Real-time CPU, RAM, storage, 10GbE network throughput, and temperature panels
+    - Docker bridge networking support with accurate host network monitoring
+    - Screen Power Management: sleep schedule (night mode) and drive spindown sleep triggers
+    - Differential frame caching to minimize USB bus overhead
+    - Automatic LCD backlight power-off on container shutdown
+    - Configurable panels, fonts, and operational parameters in /config/settings.json
+  </Overview>
+  <Category>Status: Tools: System: Hardware:</Category>
+  <WebUI>http://[IP]:[PORT:8744]</WebUI>
+  <TemplateURL></TemplateURL>
+  <Icon>https://raw.githubusercontent.com/zehnm/aoostar-rs/master/docs/img/sensor_mode1.png</Icon>
+  <ExtraParams>--device=/dev/ttyACM0</ExtraParams>
+  <PostArgs></PostArgs>
+  <CPUset></CPUset>
+  <DateInstalled></DateInstalled>
+  <DonateText></DonateText>
+  <DonateLink></DonateLink>
+  <Description>
+    High-performance Rust LCD driver and system monitor for AOOSTAR WTR Max NAS.
+  </Description>
+  <Data>
+    <Volume>
+      <HostDir>/mnt/user/appdata/aoostar-display</HostDir>
+      <ContainerDir>/config</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+    <Volume>
+      <HostDir>/var/local/emhttp</HostDir>
+      <ContainerDir>/var/local/emhttp</ContainerDir>
+      <Mode>ro</Mode>
+    </Volume>
+    <Volume>
+      <HostDir>/proc/net/dev</HostDir>
+      <ContainerDir>/host/proc/net/dev</ContainerDir>
+      <Mode>ro</Mode>
+    </Volume>
+    <Volume>
+      <HostDir>/etc/localtime</HostDir>
+      <ContainerDir>/etc/localtime</ContainerDir>
+      <Mode>ro</Mode>
+    </Volume>
+    <Port>
+      <HostPort>8744</HostPort>
+      <ContainerPort>8744</ContainerPort>
+      <Protocol>tcp</Protocol>
+    </Port>
+  </Data>
+  <Environment>
+    <Variable>
+      <Value>/dev/ttyACM0</Value>
+      <Name>DEVICE</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>UTC</Value>
+      <Name>TZ</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>30</Value>
+      <Name>SWITCH_TIME</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>auto</Value>
+      <Name>NETWORK_INTERFACE</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>C</Value>
+      <Name>TEMP_UNIT</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>false</Value>
+      <Name>SLEEP_SCHEDULE_ENABLED</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>23:00</Value>
+      <Name>SLEEP_START_TIME</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>07:00</Value>
+      <Name>SLEEP_END_TIME</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>false</Value>
+      <Name>SLEEP_ON_STANDBY</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>300</Value>
+      <Name>STANDBY_DELAY</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>2</Value>
+      <Name>SENSOR_REFRESH</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>10</Value>
+      <Name>DISK_REFRESH</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>false</Value>
+      <Name>ENABLE_SMART</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>true</Value>
+      <Name>AUTO_OFF_ON_STOP</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>info</Value>
+      <Name>RUST_LOG</Name>
+      <Mode/>
+    </Variable>
+  </Environment>
+  <Config Name="Appdata Config Directory" Target="/config" Default="/mnt/user/appdata/aoostar-display" Mode="rw" Description="Persistent configuration directory for settings.json, monitor.json, custom panels, and sensor mapping." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/aoostar-display</Config>
+  <Config Name="WebUI Port" Target="8744" Default="8744" Mode="tcp" Description="Web interface port for display configuration and management (future Web UI)." Type="Port" Display="always" Required="false" Mask="false">8744</Config>
+  <Config Name="Unraid State Directory" Target="/var/local/emhttp" Default="/var/local/emhttp" Mode="ro" Description="Read-only access to Unraid system state (disks.ini and var.ini) for native array drive temperatures, capacity, spindown detection, and host IP." Type="Path" Display="always" Required="false" Mask="false">/var/local/emhttp</Config>
+  <Config Name="Host Network Statistics" Target="/host/proc/net/dev" Default="/proc/net/dev" Mode="ro" Description="Host network statistics for accurate physical 10GbE throughput monitoring while running on Docker bridge network." Type="Path" Display="always" Required="false" Mask="false">/proc/net/dev</Config>
+  <Config Name="Serial Device Path" Target="DEVICE" Default="/dev/ttyACM0" Description="Serial device path for the front LCD display UART (e.g. /dev/ttyACM0)." Type="Variable" Display="always" Required="true" Mask="false">/dev/ttyACM0</Config>
+  <Config Name="Serial Device Passthrough" Target="/dev/ttyACM0" Default="/dev/ttyACM0" Description="Passthrough for the LCD USB UART device." Type="Device" Display="always" Required="true" Mask="false">/dev/ttyACM0</Config>
+  <Config Name="Panel Rotation Interval (seconds)" Target="SWITCH_TIME" Default="30" Description="Number of seconds each panel is displayed before rotating to the next panel." Type="Variable" Display="always" Required="false" Mask="false">30</Config>
+  <Config Name="Primary Network Interface" Target="NETWORK_INTERFACE" Default="auto" Description="Network interface to display (e.g. auto, br0, bond0, eth0, eth1)." Type="Variable" Display="always" Required="false" Mask="false">auto</Config>
+  <Config Name="Temperature Unit" Target="TEMP_UNIT" Default="C" Description="Temperature display unit: C for Celsius, F for Fahrenheit." Type="Variable" Display="always" Required="false" Mask="false">C</Config>
+  <Config Name="Enable Sleep Schedule" Target="SLEEP_SCHEDULE_ENABLED" Default="false" Description="Enable automatic display blanking during specified sleep hours (e.g. night mode)." Type="Variable" Display="always" Required="false" Mask="false">false</Config>
+  <Config Name="Sleep Schedule Start Time" Target="SLEEP_START_TIME" Default="23:00" Description="Time to turn off display backlight (24-hour format HH:MM, e.g. 23:00)." Type="Variable" Display="always" Required="false" Mask="false">23:00</Config>
+  <Config Name="Sleep Schedule End Time" Target="SLEEP_END_TIME" Default="07:00" Description="Time to wake up display backlight (24-hour format HH:MM, e.g. 07:00)." Type="Variable" Display="always" Required="false" Mask="false">07:00</Config>
+  <Config Name="Sleep on All Disks Standby" Target="SLEEP_ON_STANDBY" Default="false" Description="Automatically turn off display backlight when all array drives are spun down / in standby." Type="Variable" Display="always" Required="false" Mask="false">false</Config>
+  <Config Name="Standby Sleep Delay (seconds)" Target="STANDBY_DELAY" Default="300" Description="Delay in seconds after all array disks enter standby before turning off the display (default: 300 = 5 minutes)." Type="Variable" Display="advanced" Required="false" Mask="false">300</Config>
+  <Config Name="Host Timezone File" Target="/etc/localtime" Default="/etc/localtime" Mode="ro" Description="Pass host localtime into container for automatic clock synchronization." Type="Path" Display="advanced" Required="false" Mask="false">/etc/localtime</Config>
+  <Config Name="Timezone" Target="TZ" Default="UTC" Description="Set container timezone to match host for accurate clock display (e.g. America/New_York, Europe/London, Australia/Sydney). Leave as UTC if mounting /var/local/emhttp or /etc/localtime for auto-detection." Type="Variable" Display="advanced" Required="true" Mask="false">UTC</Config>
+  <Config Name="Sensor Refresh Interval (seconds)" Target="SENSOR_REFRESH" Default="2" Description="Interval in seconds for refreshing CPU, memory, and network metrics." Type="Variable" Display="advanced" Required="false" Mask="false">2</Config>
+  <Config Name="Disk Refresh Interval (seconds)" Target="DISK_REFRESH" Default="10" Description="Interval in seconds for refreshing disk metrics." Type="Variable" Display="advanced" Required="false" Mask="false">10</Config>
+  <Config Name="Enable SMART Temperature" Target="ENABLE_SMART" Default="false" Description="Enable smartctl disk temperature retrieval (requires privileged container)." Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+  <Config Name="Turn Off Display on Stop" Target="AUTO_OFF_ON_STOP" Default="true" Description="Automatically switch off LCD backlight when container stops." Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
+  <Config Name="Log Level" Target="RUST_LOG" Default="info" Description="Log verbosity (info, debug, warn, error)." Type="Variable" Display="advanced" Required="false" Mask="false">info</Config>
+</Container>

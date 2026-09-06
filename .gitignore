@@ -1,0 +1,7 @@
+/target
+**/target/
+**/*.rs.bk
+*.log
+.tempmediaStorage/
+aoostar-wtr-max-truenas-display/
+

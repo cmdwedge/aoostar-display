@@ -1,0 +1,837 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025 Markus Zehnder
+
+//! AOOSTAR-X json configuration file format.
+//!
+//! Derived from the available Monitor3.json file in AOOSTAR-X v1.3.4.
+//! Likely not fully compatible with files created with the original editor.
+
+use anyhow::Context;
+use image::{Rgb, Rgba};
+use imageproc::definitions::HasWhite;
+use log::{info, warn};
+use regex::Regex;
+use serde::de::Visitor;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_repr::{Deserialize_repr, Serialize_repr};
+use std::collections::HashMap;
+use std::io::BufReader;
+use std::num::ParseIntError;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::{fmt, fs};
+
+pub fn load_cfg<P: AsRef<Path>>(path: P) -> anyhow::Result<MonitorConfig> {
+    let path = path.as_ref();
+    let file = fs::File::open(path).with_context(|| format!("Failed to load config {path:?}"))?;
+    let reader = BufReader::new(file);
+    let config: MonitorConfig = serde_json::from_reader(reader)?;
+
+    for active in config.active_panels.clone() {
+        if active == 0 || active > config.panels.len() as u32 {
+            warn!("Ignoring invalid active panel {active}");
+            continue;
+        }
+        let panel = &config.panels[active as usize - 1];
+
+        println!(
+            "Panel {active}: {}",
+            panel.img.as_deref().unwrap_or_default()
+        );
+        for sensor in &panel.sensor {
+            println!(
+                "  {}: {} {} {}",
+                sensor.label,
+                sensor
+                    .name
+                    .as_deref()
+                    .or(sensor.item_name.as_deref())
+                    .unwrap_or_default(),
+                sensor.value.as_deref().unwrap_or_default(),
+                sensor.unit.as_deref().unwrap_or_default()
+            );
+        }
+    }
+
+    Ok(config)
+}
+
+/// Load a custom panel configuration.
+///
+/// The distributed panel ZIP file must be extracted and contain:
+/// - `panel.json` configuration file
+/// - `img` subdirectory containing the referenced images in panel.json
+/// - `fonts` subdirectory containing the referenced fonts in panel.json
+///
+/// # Arguments
+///
+/// * `path`: directory path of the extracted custom panel.
+///
+/// returns: Result<Panel, Error>
+pub fn load_custom_panel<P: AsRef<Path>>(path: P) -> anyhow::Result<Panel> {
+    let path = path.as_ref();
+    let panel_file = path.join("panel.json");
+
+    info!("Loading custom panel {panel_file:?}");
+
+    let file = fs::File::open(&panel_file)
+        .with_context(|| format!("Failed to load custom panel {panel_file:?}"))?;
+    let reader = BufReader::new(file);
+    let mut panel: Panel = serde_json::from_reader(reader)?;
+
+    // adjust font and image file paths
+    let img_path = fs::canonicalize(path.join("img"))?;
+    let font_path = fs::canonicalize(path.join("fonts"))?;
+    if let Some(img) = &panel.img
+        && !Path::new(img).is_absolute()
+    {
+        panel.img = Some(img_path.join(img).display().to_string());
+    }
+    for sensor in panel.sensor.iter_mut() {
+        if let Some(pic) = &sensor.pic
+            && !Path::new(pic).is_absolute()
+        {
+            sensor.pic = Some(img_path.join(pic).display().to_string());
+        }
+        if let Some(font_family) = &sensor.font_family
+            && !font_family.is_empty()
+            && !Path::new(&font_family).is_absolute()
+        {
+            sensor.font_family = Some(font_path.join(font_family).display().to_string());
+        }
+    }
+
+    Ok(panel)
+}
+
+/// AOOSTAR-X monitor json configuration file
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MonitorConfig {
+    // _Not used_
+    // pub credentials: Option<Credentials>,
+    /// Configuration settings.
+    pub setup: Setup,
+    /// Panels: 1-based index into `panels`
+    #[serde(rename = "mianban")]
+    pub active_panels: Vec<u32>,
+    /// Custom panels / DIY "Do It Yourself",
+    #[serde(rename = "diy")]
+    pub panels: Vec<Panel>,
+    /// Internal index of the currently active panel. 1-based!
+    #[serde(skip)]
+    active_panel_idx: Option<usize>,
+    /// Internal sensor label mapping
+    #[serde(skip)]
+    sensor_mapping: Option<HashMap<String, String>>,
+    /// Internal sensor filter
+    #[serde(skip)]
+    pub sensor_filter: Option<Vec<Regex>>,
+}
+
+impl MonitorConfig {
+    pub fn get_next_active_panel(&mut self) -> Option<&Panel> {
+        let mut active_panel_idx = self.active_panel_idx.unwrap_or(0) + 1;
+        if active_panel_idx > self.panels.len() {
+            active_panel_idx = 1;
+        }
+
+        for (index, active) in self
+            .active_panels
+            .iter()
+            .filter(|&active| *active > 0)
+            .enumerate()
+        {
+            if *active > self.panels.len() as u32 {
+                warn!("Ignoring invalid active panel {active}");
+                continue;
+            }
+            if index + 1 == active_panel_idx {
+                self.active_panel_idx = Some(active_panel_idx);
+                return Some(&self.panels[*active as usize - 1]);
+            }
+        }
+
+        None
+    }
+
+    /// Adds a custom panel to the application and maps sensor labels if applicable.
+    ///
+    /// The panel is marked active and will be returned with [get_next_active_panel] when it is its turn.
+    ///
+    /// # Arguments
+    ///
+    /// * `panel` - the Panel to include in the active panels.
+    pub fn include_custom_panel(&mut self, mut panel: Panel) {
+        if let Some(mapping) = &self.sensor_mapping {
+            panel.map_sensor_labels(mapping);
+        }
+        self.panels.push(panel);
+        self.active_panels.push(self.panels.len() as u32);
+    }
+
+    /// Apply a sensor label mapping on the included panels.
+    ///
+    /// The mapping will also be applied on any custom panel added in the future with [include_custom_panel].
+    ///
+    /// **Attention**: this method may only be called once at startup.
+    /// Dynamically changing mappings are not supported, and the original sensor labels are not preserved.
+    pub fn set_sensor_mapping(&mut self, mapping: HashMap<String, String>) {
+        for panel in self.panels.iter_mut() {
+            panel.map_sensor_labels(&mapping);
+        }
+        self.sensor_mapping = Some(mapping);
+    }
+}
+
+/// Web-app user login
+///
+/// Not used, part of AOOSTAR-X json configuration file.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Credentials {
+    pub username: String,
+    pub password: String,
+}
+
+/// Configuration settings.
+///
+/// Note: Trimmed down object to include only required fields for `asterctl`.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Setup {
+    /// Switch time between panels in seconds, interpreted as float and converted to milliseconds. Default: 5
+    pub switch_time: Option<String>, // existed as "30" string
+    /// Panel redraw interval in seconds. Default: 1
+    pub refresh: f32,
+    /*
+    // The following fields of the AOOSTAR-X json configuration file are NOT used in `asterctl`
+    /// Default: true
+    pub off_display: bool,
+    /// Selection of default panels based on theme / control_params / control_disk_temp ?
+    pub theme: i32,
+    /// ? Default: true
+    pub control_params: bool,
+    /// ? Default: true
+    pub control_disk_temp: bool,
+    /// Default: false
+    pub custom_panel: bool,
+    /// Language index. Default: 0
+    pub language: Language,
+    /// Operation mode: performance, power saving, etc.
+    pub operation_mode: Option<OperationMode>,
+    /// Operation type 1 or 2 (?). Default: 1
+    #[serde(rename = "type")]
+    pub operation_type: Option<i16>,
+    /// Default: 300
+    pub disk_update: i32,
+    /// Home Assistant URL
+    #[serde(deserialize_with = "empty_string_as_none")]
+    #[serde(rename = "ha_url")]
+    pub ha_url: Option<String>, // "" in JSON ⇒ Option<String>
+    /// Home Assistant long-lived access token
+    #[serde(deserialize_with = "empty_string_as_none")]
+    #[serde(rename = "ha_token")]
+    pub ha_token: Option<String>, // "" in JSON ⇒ Option<String>
+    */
+}
+
+/// Language setting.
+///
+/// Not used, part of AOOSTAR-X json configuration file.
+#[derive(Debug, Copy, Clone, Serialize_repr, Deserialize_repr, PartialEq)]
+#[repr(u8)]
+#[allow(dead_code)]
+pub enum Language {
+    Chinese = 0,
+    English = 1,
+    Japanese = 2,
+}
+
+/// Not used, part of AOOSTAR-X json configuration file.
+#[derive(Debug, Copy, Clone, Serialize_repr, Deserialize_repr, PartialEq)]
+#[repr(i16)]
+#[allow(dead_code)]
+pub enum OperationMode {
+    None = -1,
+    HighPerformance = 0,
+    Intelligent = 1,
+    PowerSaving = 2,
+    Custom30W = 3,
+    Custom20W = 4,
+    Custom10W = 5,
+}
+
+#[derive(Debug, Copy, Clone, Serialize_repr, Deserialize_repr, PartialEq)]
+#[repr(u8)]
+pub enum SensorDirection {
+    /// Also used for clockwise in circular/arc progress & rotating pointer/dial indicator
+    LeftToRight = 1,
+    /// Also used for counter-clockwise in circular/arc & rotating pointer/dial progress indicator
+    RightToLeft = 2,
+    TopToBottom = 3,
+    BottomToTop = 4,
+}
+
+/// Custom DIY panel definition
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Panel {
+    /// Custom panel id
+    pub id: Option<String>,
+    /// Custom panel name
+    pub name: Option<String>,
+    /*
+    // The following fields of the AOOSTAR-X json configuration file are NOT used in `asterctl`
+    /// TODO
+    pub checked: Option<bool>,
+    /// TODO panel type: 5 = built-in? 6 = custom ?
+    #[serde(rename = "type")]
+    pub panel_type: i32,
+     */
+    /// Background image filename
+    pub img: Option<String>,
+    /// Sensors
+    pub sensor: Vec<Sensor>,
+}
+
+impl Panel {
+    pub fn friendly_name(&self) -> String {
+        self.name
+            .clone()
+            .or_else(|| self.id.clone())
+            .or_else(|| {
+                if let Some(img_file) = &self.img {
+                    let img_file = PathBuf::from(img_file);
+                    img_file
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "panel".into())
+    }
+
+    fn map_sensor_labels(&mut self, mapping: &HashMap<String, String>) {
+        for sensor in self.sensor.iter_mut() {
+            if let Some(new_label) = mapping.get(&sensor.label) {
+                sensor.label = new_label.clone();
+            }
+        }
+    }
+}
+
+/// One Data Display Unit
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Sensor {
+    /// Sensor mode: text, fan, progress, pointer
+    pub mode: SensorMode,
+    /// Sensor type, _not used_.
+    /// - 1 Time / Date Labels
+    /// - 2 Windows-specific system info
+    /// - 3 Hardware value
+    /// - 4 AIDA64 sensor
+    /// - 5 HA sensor
+    /// - 6 http fetch from url
+    /// - 7 system info ?
+    /// - 8 lm-sensor ?
+    #[serde(rename = "type")]
+    pub sensor_type: Option<i32>,
+    /// Label name for internal panels.
+    pub name: Option<String>,
+    /// Label name for custom panels.
+    pub item_name: Option<String>,
+    /// Label identifier, also used as data source identifier.
+    pub label: String,
+    /// Sensor value. Ignored: value is used from a sensor source
+    #[serde(deserialize_with = "empty_string_as_none")]
+    pub value: Option<String>, // "" or numbers, so Option<String>
+
+    /// Image for progress, fan and pointer indicators
+    pub min_value: Option<f32>,
+    /// Image for progress, fan and pointer indicators
+    pub max_value: Option<f32>,
+
+    /// Optional unit text to print after the value
+    #[serde(deserialize_with = "empty_string_as_none")]
+    pub unit: Option<String>,
+    /// Rounded x-position. Custom panel coordinates are stored as float!
+    #[serde(deserialize_with = "f32_as_rounded_i32")]
+    pub x: i32,
+    /// Rounded y-position. Custom panel coordinates are stored as float!
+    #[serde(deserialize_with = "f32_as_rounded_i32")]
+    pub y: i32,
+    /// Used for pointer type
+    pub width: Option<u32>,
+    /// Used for pointer type
+    pub height: Option<u32>,
+    /// Sensor graphic orientation
+    pub direction: Option<SensorDirection>,
+
+    /// Font name matching font filename without file extension.
+    pub font_family: Option<String>,
+    /// TODO font size unit: points or pixels?
+    pub font_size: Option<i32>,
+    /// Font color in `#RRGGBB` notation, or -1 if not set. #ffffff = white, #ff0000 = red
+    pub font_color: Option<FontColor>,
+    /// _Not (yet) used_
+    pub font_weight: Option<FontWeight>,
+    pub text_align: Option<TextAlign>,
+
+    /// Number of integer places for the sensor value.
+    // -1 ≈ unset ⇒ Option<i32>
+    #[serde(deserialize_with = "option_none_if_minus_one")]
+    pub integer_digits: Option<i32>,
+    /// Number of decimal places for the sensor value.
+    // -1 ≈ unset ⇒ Option<i32>
+    #[serde(deserialize_with = "option_none_if_minus_one")]
+    pub decimal_digits: Option<i32>,
+    /// Image for progress, fan and pointer indicators
+    #[serde(deserialize_with = "empty_string_as_none")]
+    pub pic: Option<String>,
+
+    /// Used for fan & pointer sensors
+    pub min_angle: Option<i32>,
+    /// Used for fan & pointer sensors
+    pub max_angle: Option<i32>,
+
+    /// Pivot x
+    #[serde(rename = "xz_x")]
+    pub xz_x: Option<i32>,
+    /// Pivot y
+    #[serde(rename = "xz_y")]
+    pub xz_y: Option<i32>,
+    /*
+    // The following fields of the AOOSTAR-X json configuration file are NOT used in `asterctl`
+    /// _Not (yet) used_
+    pub text_direction: i32, // layout direction
+    /// For type = 6
+    pub url: Option<String>,
+    /// For type = 6
+    pub data: Option<String>,
+    /// For type = 6
+    pub interval: Option<u32>,
+     */
+}
+
+/// Sensor element type. Name is based on AOOSTAR-X web configuration
+#[derive(Debug, Clone, Copy, Serialize_repr, Deserialize_repr, Eq, Hash, PartialEq)]
+#[repr(u8)]
+pub enum SensorMode {
+    /// Text element
+    Text = 1,
+    /// Circular/arc progress indicator
+    Fan = 2,
+    /// Horizontal or vertical progress indicator
+    Progress = 3,
+    /// Rotating pointer/dial indicator
+    Pointer = 4,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum TimeDateLabel {
+    #[serde(rename = "DATE_year")]
+    Year,
+    #[serde(rename = "DATE_month")]
+    Month,
+    #[serde(rename = "DATE_day")]
+    Day,
+    #[serde(rename = "DATE_hour")]
+    Hour,
+    #[serde(rename = "DATE_minute")]
+    Minute,
+    #[serde(rename = "DATE_second")]
+    Second,
+    #[serde(rename = "DATE_m_d_h_m_1")]
+    MDHM1,
+    #[serde(rename = "DATE_m_d_h_m_2")]
+    MDHM2,
+    #[serde(rename = "DATE_m_d_1")]
+    MD1,
+    #[serde(rename = "DATE_m_d_2")]
+    MD2,
+    #[serde(rename = "DATE_y_m_d_1")]
+    YMD1,
+    #[serde(rename = "DATE_y_m_d_2")]
+    YMD2,
+    #[serde(rename = "DATE_y_m_d_3")]
+    YMD3,
+    #[serde(rename = "DATE_y_m_d_4")]
+    YMD4,
+    #[serde(rename = "DATE_h_m_s_1")]
+    HMS1,
+    #[serde(rename = "DATE_h_m_s_2")]
+    HMS2,
+    #[serde(rename = "DATE_h_m_s_3")]
+    HMS3,
+    #[serde(rename = "DATE_h_m_1")]
+    HM1,
+    #[serde(rename = "DATE_h_m_2")]
+    HM2,
+    #[serde(rename = "DATE_h_m_3")]
+    HM3,
+}
+
+#[derive(Debug, Copy, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FontWeight {
+    #[default]
+    Normal,
+    Bold,
+}
+
+#[derive(Debug, Copy, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+fn option_none_if_minus_one<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<i32>::deserialize(deserializer)? {
+        Some(-1) | None => Ok(None),
+        Some(other) => Ok(Some(other)),
+    }
+}
+
+/// Special font color type since it is represented either as numeric -1 or as a string :-(
+///
+/// A good serde programming exercise...
+#[derive(Debug, Clone, Copy)]
+pub struct FontColor(Rgb<u8>);
+
+impl Default for FontColor {
+    fn default() -> Self {
+        FontColor(Rgb::white())
+    }
+}
+
+impl Deref for FontColor {
+    type Target = Rgb<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for FontColor {
+    type Error = ParseIntError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if value.len() != 7 || !value.starts_with('#') {
+            warn!("Invalid font color: {value}");
+            Ok(FontColor::default())
+        } else {
+            Ok(FontColor(Rgb([
+                u8::from_str_radix(&value[1..3], 16)?,
+                u8::from_str_radix(&value[3..5], 16)?,
+                u8::from_str_radix(&value[5..7], 16)?,
+            ])))
+        }
+    }
+}
+
+impl From<Rgb<u8>> for FontColor {
+    fn from(value: Rgb<u8>) -> Self {
+        FontColor(value)
+    }
+}
+
+impl From<FontColor> for Rgb<u8> {
+    fn from(val: FontColor) -> Self {
+        val.0
+    }
+}
+
+impl From<FontColor> for Rgba<u8> {
+    fn from(val: FontColor) -> Self {
+        Rgba([val.0[0], val.0[1], val.0[2], 255])
+    }
+}
+
+impl Serialize for FontColor {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        format!("#{:02x}{:02x}{:02x}", self.0[0], self.0[1], self.0[2]).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for FontColor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct MyVisitor;
+
+        impl<'de> Visitor<'de> for MyVisitor {
+            type Value = FontColor;
+
+            fn expecting(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt.write_str("integer or string")
+            }
+
+            fn visit_i64<E>(self, val: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match val {
+                    -1 => Ok(FontColor::default()),
+                    _ => Err(E::custom("invalid integer value, expected -1")),
+                }
+            }
+
+            fn visit_str<E>(self, val: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if val.trim().is_empty() {
+                    return Ok(FontColor::default());
+                }
+                match val.parse::<i32>() {
+                    Ok(val) => self.visit_i32(val),
+                    Err(_) => val
+                        .try_into()
+                        .map_err(|e| E::custom(format!("invalid font color value: {e}"))),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(MyVisitor)
+    }
+}
+
+fn empty_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let option = Option::<String>::deserialize(deserializer)?;
+    Ok(option.and_then(|s| if s.trim().is_empty() { None } else { Some(s) }))
+}
+
+fn f32_as_rounded_i32<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let rounded = f32::deserialize(deserializer).map(f32::round)?;
+    Ok(rounded as i32)
+}
+
+/// Global settings loaded from settings.json
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    #[serde(default)]
+    pub general: GeneralSettings,
+    #[serde(default)]
+    pub network: NetworkSettings,
+    #[serde(default)]
+    pub sensors: SensorsSettings,
+    #[serde(default)]
+    pub power: PowerSettings,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            general: GeneralSettings::default(),
+            network: NetworkSettings::default(),
+            sensors: SensorsSettings::default(),
+            power: PowerSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneralSettings {
+    #[serde(default = "default_web_port")]
+    pub web_port: u16,
+    #[serde(default = "default_switch_time")]
+    pub switch_time: u32,
+    #[serde(default = "default_refresh_interval")]
+    pub refresh_interval: u32,
+    #[serde(default = "default_temp_unit")]
+    pub temp_unit: String,
+    #[serde(default = "default_active_panels")]
+    pub active_panels: Vec<u32>,
+}
+
+impl Default for GeneralSettings {
+    fn default() -> Self {
+        Self {
+            web_port: default_web_port(),
+            switch_time: default_switch_time(),
+            refresh_interval: default_refresh_interval(),
+            temp_unit: default_temp_unit(),
+            active_panels: default_active_panels(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkSettings {
+    #[serde(default = "default_interface")]
+    pub interface: String,
+}
+
+impl Default for NetworkSettings {
+    fn default() -> Self {
+        Self {
+            interface: default_interface(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SensorsSettings {
+    #[serde(default = "default_sensor_refresh")]
+    pub sensor_refresh_seconds: u16,
+    #[serde(default = "default_disk_refresh")]
+    pub disk_refresh_seconds: u16,
+    #[serde(default)]
+    pub enable_smart: bool,
+}
+
+impl Default for SensorsSettings {
+    fn default() -> Self {
+        Self {
+            sensor_refresh_seconds: default_sensor_refresh(),
+            disk_refresh_seconds: default_disk_refresh(),
+            enable_smart: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PowerSettings {
+    #[serde(default)]
+    pub sleep_schedule_enabled: bool,
+    #[serde(default = "default_sleep_start")]
+    pub sleep_start_time: String,
+    #[serde(default = "default_sleep_end")]
+    pub sleep_end_time: String,
+    #[serde(default)]
+    pub sleep_on_all_disks_standby: bool,
+    #[serde(default = "default_standby_delay")]
+    pub standby_delay_seconds: u64,
+    #[serde(default = "default_true")]
+    pub wake_on_disk_activity: bool,
+    #[serde(default)]
+    pub wake_on_network_activity: bool,
+    #[serde(default = "default_network_wake_threshold")]
+    pub network_wake_threshold_bytes: u64,
+}
+
+impl Default for PowerSettings {
+    fn default() -> Self {
+        Self {
+            sleep_schedule_enabled: false,
+            sleep_start_time: default_sleep_start(),
+            sleep_end_time: default_sleep_end(),
+            sleep_on_all_disks_standby: false,
+            standby_delay_seconds: default_standby_delay(),
+            wake_on_disk_activity: default_true(),
+            wake_on_network_activity: false,
+            network_wake_threshold_bytes: default_network_wake_threshold(),
+        }
+    }
+}
+
+fn default_web_port() -> u16 { 8744 }
+fn default_switch_time() -> u32 { 30 }
+fn default_refresh_interval() -> u32 { 1 }
+fn default_temp_unit() -> String { "C".to_string() }
+fn default_active_panels() -> Vec<u32> { vec![1, 2, 3] }
+fn default_interface() -> String { "auto".to_string() }
+fn default_sensor_refresh() -> u16 { 2 }
+fn default_disk_refresh() -> u16 { 60 }
+fn default_sleep_start() -> String { "23:00".to_string() }
+fn default_sleep_end() -> String { "07:00".to_string() }
+fn default_standby_delay() -> u64 { 300 }
+fn default_true() -> bool { true }
+fn default_network_wake_threshold() -> u64 { 5_242_880 }
+
+pub fn load_settings<P: AsRef<Path>>(path: P) -> Settings {
+    let path = path.as_ref();
+    if !path.is_file() {
+        info!("Settings file {:?} not found, using default configuration", path);
+        return Settings::default();
+    }
+    match fs::File::open(path) {
+        Ok(file) => {
+            let reader = BufReader::new(file);
+            match serde_json::from_reader(reader) {
+                Ok(settings) => {
+                    info!("Successfully loaded settings from {:?}", path);
+                    settings
+                }
+                Err(e) => {
+                    warn!("Failed to parse settings file {:?}: {e}. Using defaults.", path);
+                    Settings::default()
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Failed to open settings file {:?}: {e}. Using defaults.", path);
+            Settings::default()
+        }
+    }
+}
+
+pub fn is_time_in_range(now: chrono::NaiveTime, start_str: &str, end_str: &str) -> bool {
+    let parse_time = |s: &str| -> Option<chrono::NaiveTime> {
+        let trimmed = s.trim();
+        chrono::NaiveTime::parse_from_str(trimmed, "%H:%M")
+            .or_else(|_| chrono::NaiveTime::parse_from_str(trimmed, "%H:%M:%S"))
+            .ok()
+    };
+
+    let (Some(start), Some(end)) = (parse_time(start_str), parse_time(end_str)) else {
+        return false;
+    };
+
+    if start == end {
+        false
+    } else if start < end {
+        now >= start && now < end
+    } else {
+        // Wraps over midnight (e.g. 23:00 to 07:00)
+        now >= start || now < end
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveTime;
+
+    #[test]
+    fn test_is_time_in_range_normal() {
+        let t1 = NaiveTime::from_hms_opt(12, 0, 0).unwrap();
+        let t2 = NaiveTime::from_hms_opt(19, 0, 0).unwrap();
+        assert!(is_time_in_range(t1, "09:00", "17:00"));
+        assert!(!is_time_in_range(t2, "09:00", "17:00"));
+    }
+
+    #[test]
+    fn test_is_time_in_range_overnight() {
+        let t1 = NaiveTime::from_hms_opt(23, 30, 0).unwrap();
+        let t2 = NaiveTime::from_hms_opt(3, 0, 0).unwrap();
+        let t3 = NaiveTime::from_hms_opt(7, 0, 0).unwrap();
+        let t4 = NaiveTime::from_hms_opt(12, 0, 0).unwrap();
+        assert!(is_time_in_range(t1, "23:00", "07:00"));
+        assert!(is_time_in_range(t2, "23:00", "07:00"));
+        assert!(!is_time_in_range(t3, "23:00", "07:00"));
+        assert!(!is_time_in_range(t4, "23:00", "07:00"));
+    }
+}
+

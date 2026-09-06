@@ -1,0 +1,31 @@
+{
+  "general": {
+    "webPort": 8744,
+    "switchTime": 30,
+    "refreshInterval": 1,
+    "tempUnit": "C",
+    "activePanels": [
+      1,
+      2,
+      3
+    ]
+  },
+  "network": {
+    "interface": "auto"
+  },
+  "sensors": {
+    "sensorRefreshSeconds": 2,
+    "diskRefreshSeconds": 60,
+    "enableSmart": false
+  },
+  "power": {
+    "sleepScheduleEnabled": false,
+    "sleepStartTime": "23:00",
+    "sleepEndTime": "07:00",
+    "sleepOnAllDisksStandby": false,
+    "standbyDelaySeconds": 300,
+    "wakeOnDiskActivity": true,
+    "wakeOnNetworkActivity": false,
+    "networkWakeThresholdBytes": 5242880
+  }
+}
